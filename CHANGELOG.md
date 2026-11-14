@@ -3,6 +3,17 @@
 Notable changes to `sentinelx-cloud-core`. Human-readable, date-stamped
 entries; releases before 0.3.0 predate this file — see the git history.
 
+## 0.23.60 - File times from read and list are UTC on Windows too - 2026-11-14
+
+- sentinel_read's modified_at and sentinel_list's mtime were built with time.strftime("%Y-%m-%dT%H:%M:%S%z",
+  time.gmtime(ts)). On Windows %z ignores the struct's offset and writes the machine's local one, so a
+  Windows host returned the UTC digits labelled with its own offset (2026-11-13T02:25:20-0800 for a file
+  written at 02:25:20 UTC; sxrep_1YBCB7HSZG1F). Linux and macOS were right (+0000). Both now come from one
+  helper, _utc_iso, which formats a timezone-aware UTC datetime; the value and its format are unchanged
+  where they were already correct.
+- tests/test_file_times_utc.py: read and list, each with the real strftime and with %z behaving as on
+  Windows (4 tests). With the old code both Windows cases fail. Suite passes on 3.12 and 3.14.
+
 ## 0.23.59 - Finding of sx-review on 0.23.58: edit_upload's upload_id left the staging root - 2026-11-04
 
 - edit_upload_file and edit_upload_complete built their working directory from the caller's upload_id with

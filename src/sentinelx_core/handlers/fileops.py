@@ -91,6 +91,7 @@ import re
 import stat
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -264,6 +265,17 @@ def _probably_missing(p: Path) -> bool:
     except OSError as exc:
         return exc.errno in _MISSING_ERRNOS
     return False
+
+
+def _utc_iso(ts: float) -> str:
+    """A file time as ISO 8601 in UTC, e.g. 2026-11-13T02:25:20+0000.
+
+    Formatting a gmtime() struct with time.strftime's %z is wrong on Windows:
+    there %z ignores the struct's tm_gmtoff and writes the machine's LOCAL
+    offset, so a UTC time came back labelled -0800 (sxrep_1YBCB7HSZG1F).
+    datetime fills %z from its own tzinfo before formatting, on every platform.
+    """
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
 def _file_type(st: os.stat_result) -> str:
@@ -608,9 +620,7 @@ def make_read_handler(policy: Policy):
             end = view_range[1]
 
         size = st.st_size
-        modified_at = time.strftime(
-            "%Y-%m-%dT%H:%M:%S%z", time.gmtime(st.st_mtime)
-        )
+        modified_at = _utc_iso(st.st_mtime)
 
         try:
             with resolved.open("rb") as f:
@@ -849,10 +859,7 @@ def make_list_handler(policy: Policy):
                         "name": rel,
                         "type": _file_type(child_st),
                         "size": child_st.st_size,
-                        "mtime": time.strftime(
-                            "%Y-%m-%dT%H:%M:%S%z",
-                            time.gmtime(child_st.st_mtime),
-                        ),
+                        "mtime": _utc_iso(child_st.st_mtime),
                     })
                     if len(entries) >= cap:
                         truncated = True
