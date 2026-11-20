@@ -160,6 +160,36 @@ def _without_secret(payload: Any) -> Any:
     return out
 
 
+def _omit_local_api_ticket(op: str, payload: Any) -> Any:
+    """Redact bearer tickets in local_api parameters without retaining hashes.
+
+    Other local_api fields are preserved, including the endpoint/action
+    metadata needed by the host audit. Never alter caller-owned payload.
+    """
+    if op != "local_api" or not isinstance(payload, dict):
+        return payload
+    params = payload.get("params")
+    if payload.get("endpoint") == "tohy_privileged_broker":
+        # This fixed endpoint takes an untrusted request body carrying a
+        # bearer token. Never persist ANY user-supplied parameter, including
+        # unknown keys or copies of the ticket under a different name.
+        action = payload.get("action")
+        if action not in ("audit.check", "audit.record"):
+            action = "invalid"
+        return {
+            "operation": "call",
+            "endpoint": "tohy_privileged_broker",
+            "action": action,
+            "params": {"omitted": "privileged_request"},
+        }
+    if not isinstance(params, dict) or "ticket" not in params:
+        return payload
+    out = dict(payload)
+    out["params"] = dict(params)
+    out["params"]["ticket"] = {"omitted": "secret"}
+    return out
+
+
 def record(op: str, payload: dict[str, Any], ok: bool,
            error: str | None = None, duration_ms: int | None = None,
            result_ok: bool | None = None,
@@ -185,7 +215,7 @@ def record(op: str, payload: dict[str, Any], ok: bool,
         entry: dict[str, Any] = {
             "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
             "op": op,
-            "payload": _compact(_without_secret(payload)),
+            "payload": _compact(_omit_local_api_ticket(op, _without_secret(payload))),
             "ok": ok,
             "error": error,
             "duration_ms": duration_ms,
