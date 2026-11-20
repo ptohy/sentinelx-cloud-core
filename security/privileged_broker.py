@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import socket
@@ -214,9 +215,47 @@ def _read_request(connection: socket.socket) -> dict[str, Any]:
         obj = json.loads(data.decode("utf-8"))
     except (UnicodeError, ValueError):
         reject("request JSON invalid")
-    if not isinstance(obj, dict) or type(obj.get("version")) is not int or obj["version"] != VERSION:
+    if not isinstance(obj, dict):
+        reject("request schema unsupported")
+    if obj.get("jsonrpc") == "2.0":
+        return obj
+    if type(obj.get("version")) is not int or obj["version"] != VERSION:
         reject("request schema unsupported")
     return obj
+
+
+def _jsonrpc_to_native(obj: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Allow only the fixed execution action through local_api JSON-RPC.
+
+    Issuing a ticket via JSON-RPC is intentionally impossible. Root issuance
+    is available only through the separate, root-authenticated native route.
+    """
+    if set(obj) != {"jsonrpc", "id", "method", "params"}:
+        reject("JSON-RPC request fields invalid")
+    request_id = obj["id"]
+    if (
+        obj["jsonrpc"] != "2.0"
+        or not isinstance(request_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", request_id)
+        or obj["method"] not in ("tohy.audit.check", "tohy.audit.record")
+    ):
+        reject("JSON-RPC request not allowlisted")
+    params = obj["params"]
+    if not isinstance(params, dict) or set(params) != {"ticket"}:
+        reject("JSON-RPC parameters invalid")
+    # The operation is derived solely from the fixed RPC method. No caller-
+    # provided params field can turn a configured read into a write.
+    operation = {
+        "tohy.audit.check": "audit-check",
+        "tohy.audit.record": "audit-record",
+    }[obj["method"]]
+    ticket = params["ticket"]
+    if not isinstance(ticket, str) or not re.fullmatch(r"[0-9a-f]{64}", ticket):
+        reject("JSON-RPC ticket format invalid")
+    return request_id, {
+        "version": VERSION, "action": "execute",
+        "operation": operation, "ticket": ticket,
+    }
 
 
 def _fixed_operation(operation: str) -> dict[str, Any]:
@@ -287,13 +326,27 @@ class Broker:
                 except socket.timeout:
                     continue
                 with conn:
+                    is_rpc = False
+                    rpc_id: str | None = None
                     try:
                         _, uid, gid = _peercred(conn)
                         obj = _read_request(conn)
+                        is_rpc = obj.get("jsonrpc") == "2.0"
+                        if is_rpc:
+                            rpc_id, obj = _jsonrpc_to_native(obj)
                         reply = self.handle(obj, uid, gid)
+                        if is_rpc:
+                            reply = {"jsonrpc": "2.0", "id": rpc_id, "result": reply}
                     except (Rejected, OSError, ValueError, TypeError, KeyError) as exc:
-                        # No user-controlled fields in errors.
-                        reply = {"ok": False, "reason": str(exc) if isinstance(exc, Rejected) else "invalid request"}
+                        # No user-controlled fields in errors; no bearer secret.
+                        reason = str(exc) if isinstance(exc, Rejected) else "invalid request"
+                        if is_rpc:
+                            reply = {
+                                "jsonrpc": "2.0", "id": rpc_id,
+                                "error": {"code": -32000, "message": reason},
+                            }
+                        else:
+                            reply = {"ok": False, "reason": reason}
                     encoded = json.dumps(reply, sort_keys=True).encode("utf-8") + b"\n"
                     if len(encoded) > MAX_RESPONSE_BYTES:
                         encoded = b'{"ok":false,"reason":"response bounded"}\n'
