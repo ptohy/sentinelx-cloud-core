@@ -60,6 +60,7 @@ from sentinelx_core.executor import HandlerError
 from sentinelx_core.executor_engine import _kill_process_tree, run_process, timeout_text  # noqa: F401 (re-exported for tests)
 from sentinelx_core.jobs import BACKGROUND_TIMEOUT_MAX
 from sentinelx_core.policy import Policy
+from sentinelx_core.privileged_admission import AdmissionDenied, enforce
 from sentinelx_core.staging import staging_root
 
 
@@ -330,6 +331,23 @@ def make_script_run_handler(policy: Policy, upload_base: Path):
                     "with sudo=true, env names must be letters, digits and _ "
                     f"(not starting with a digit): {bad}",
                 )
+
+        # Admission comes before staging, so denied requests leave no script
+        # worktree and cannot invoke any privileged subprocess.
+        if sudo and sys.platform != "win32":
+            try:
+                enforce(
+                    policy.script_run_sudo_mode,
+                    interpreter=interpreter,
+                    content=content,
+                    args=args,
+                    cwd=str(cwd) if cwd is not None else None,
+                    env=env_extra,
+                    timeout=timeout,
+                    background=background,
+                )
+            except AdmissionDenied as exc:
+                raise HandlerError("permission_denied", str(exc)) from None
 
         # Workdir. A full disk surfaces here first, and used to escape as a bare
         # "internal_error: [Errno 28] No space left on device" -- which reads like
