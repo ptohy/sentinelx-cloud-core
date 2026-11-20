@@ -47,6 +47,20 @@
 # ============================================================================
 disabled_ops: []
 
+# Optional admission for script_run(sudo=true), separate from exec allowlists.
+# LEGACY is the default and preserves deployed behavior until deliberate
+# migration. DENY blocks privileged script_run before creating a workdir.
+# APPROVAL requires a root-owned manifest of exact request fingerprints,
+# valid for at most one hour, at:
+#   /etc/sentinelx/privileged-script-approvals.json
+# This application check is NOT an OS privilege boundary: script_run without
+# sudo=true can still invoke sudo inside its content if sudoers allows it.
+# Do not remove NOPASSWD: ALL solely on the basis of this feature: a trusted
+# privileged broker with one-use authorization is required for a secure cutover.
+#
+# security:
+#   script_run_sudo_mode: legacy  # legacy | deny | approval
+
 # ============================================================================
 # How `exec` decides what may run. Three modes:
 #

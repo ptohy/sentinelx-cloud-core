@@ -400,6 +400,10 @@ class Policy:
     # supported way to say no. Now there is.
     disabled_ops: frozenset[str] = field(default_factory=frozenset)
 
+    # Privileged script_run admission: legacy (compatible default), deny, or
+    # exact root-owned time-bound approvals. This is not an OS sudo boundary.
+    script_run_sudo_mode: str = "legacy"
+
     # Command prefixes the agent will execute via the `exec` op.
     # An exec request matches if cmd.startswith(allowed) for some entry.
     allowed_commands: tuple[str, ...] = field(default_factory=tuple)
@@ -616,6 +620,11 @@ class Policy:
         exec_block = data.get("exec", {}) or {}
         security_block = data.get("security", {}) or {}
         file_ops_block = data.get("file_ops", {}) or {}
+        sudo_mode = security_block.get("script_run_sudo_mode", "legacy")
+        if sudo_mode not in ("legacy", "deny", "approval"):
+            raise ValueError(
+                "security.script_run_sudo_mode must be legacy, deny or approval"
+            )
 
         services: dict[str, ServiceSpec] = {}
         for name, meta in (data.get("services") or {}).items():
@@ -899,6 +908,7 @@ class Policy:
             disabled_ops=frozenset(
                 str(o).strip() for o in (data.get("disabled_ops") or []) if str(o).strip()
             ),
+            script_run_sudo_mode=sudo_mode,
             services=services,
             local_apis=local_apis,
             locations=locations,
