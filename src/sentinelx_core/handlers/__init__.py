@@ -185,6 +185,13 @@ def build_registry(
         upload_base=upload_base,
     )
 
+    # The fixed-operation root broker is never advertised by default; when
+    # enabled, dispatch remains subject to its own SO_PEERCRED and ticket checks.
+    if policy.privileged_broker_enabled:
+        from sentinelx_core.handlers.privileged_broker import make_privileged_broker_handler
+
+        registry["privileged_broker"] = make_privileged_broker_handler()
+
     # Only when the host opted in. No local_apis block means no handler and no
     # advertised capability, which is what makes this additive for the fleet.
     if policy.local_apis:

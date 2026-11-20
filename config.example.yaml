@@ -47,6 +47,13 @@
 # ============================================================================
 disabled_ops: []
 
+# Experimental, NOT ENABLED on deployed hosts: a fixed-operation broker with
+# root-issued one-use tickets. This only registers the privileged_broker op
+# when true. It does NOT restrict script_run, exec or existing sudo privileges.
+# A root daemon and trusted independent approval path are mandatory.
+# security:
+#   privileged_broker_enabled: false
+
 # ============================================================================
 # How `exec` decides what may run. Three modes:
 #

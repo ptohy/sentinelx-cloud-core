@@ -93,6 +93,50 @@ Local tests ran under a separate transient systemd unit with memory limits:
 - Temporary test socket, database and root broker were all removed. No
   production daemon, firewall, sudoers, systemd override or workload changed.
 
+
+## Optional SentinelX agent client (separate stacked integration)
+
+The next-stage agent integration adds the new
+`security.privileged_broker_enabled: true` policy field. Its default is
+`false`, so the handler is not built, dispatched or advertised to the hub
+unless explicitly enabled. No other operation or sudo permission is changed.
+
+When the operator explicitly enables it, the agent advertises
+`privileged_broker` and accepts only an operation from the fixed
+`audit-check`/`audit-record` set plus one 64-character lowercase ticket.
+The handler sends the request through the immutable Unix socket path
+`/run/tohy-sentinelx-privileged-broker/broker.sock`, checking root-owned
+directory and socket permissions and verifying the server's UID/GID via
+Linux `SO_PEERCRED`. It verifies response framing and returns only a
+small, fixed completion object; server-supplied error text is suppressed.
+
+The local audit log intentionally omits the raw bearer token and any
+extra submitted fields for this operation. The existing audit semantics
+for every other op are unchanged. A malicious or malformed request must
+not cause arbitrary code execution or disclose the token through the
+agent's handler result/error.
+
+**Mandatory dependency:** the wire protocol also has a closed OpType
+list and must be upgraded in lockstep. The staged protocol extension is
+tracked in [ptohy/sentinelx-cloud-protocol PR #1](https://github.com/ptohy/sentinelx-cloud-protocol/pull/1).
+Without protocol support, the hub rejects the new operation before it
+reaches the handler, even if the handler has been enabled in agent policy.
+
+**Not production-ready:** the operator currently has no trusted
+independent approval UI/channel; the root broker does not provide
+recovery supervision, high-assurance audit receipts or identity binding
+to the source request, and the legacy host has unrestricted sudo.
+The ticket may also pass through additional hub/client boundaries whose
+logging and retention have not been audited. Never send an actual
+production ticket through an unreviewed hub request pipeline.
+
+The broker and this client are kept in Draft PRs without deployment,
+socket service, config change, sudoers change or agent restart. Tests
+through the agent registry and Executor.dispatch use a simulated socket;
+the broker itself was independently tested with root socket and real
+UID 992 under NoNewPrivileges. The combined real agent-dispatch/socket
+canary remains required before deployment.
+
 ## Next implementation gates
 
 1. Define a trusted approver identity separate from the SentinelX service;

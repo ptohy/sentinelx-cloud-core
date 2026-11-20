@@ -160,6 +160,21 @@ def _without_secret(payload: Any) -> Any:
     return out
 
 
+def _safe_payload_for_op(op: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Exclude all caller-controlled data except a validated operation label.
+
+    The privileged broker ticket is a bearer secret. Its raw value, its
+    length, any extra keys and hashes MUST NOT be persisted in local audit.
+    The result body and error messages are already fixed by the handler.
+    """
+    if op == "privileged_broker":
+        operation = payload.get("operation") if isinstance(payload, dict) else None
+        if operation not in ("audit-check", "audit-record"):
+            operation = "invalid"
+        return {"operation": operation, "bearer_ticket": "omitted"}
+    return _without_secret(payload)
+
+
 def record(op: str, payload: dict[str, Any], ok: bool,
            error: str | None = None, duration_ms: int | None = None,
            result_ok: bool | None = None,
@@ -185,7 +200,7 @@ def record(op: str, payload: dict[str, Any], ok: bool,
         entry: dict[str, Any] = {
             "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
             "op": op,
-            "payload": _compact(_without_secret(payload)),
+            "payload": _compact(_safe_payload_for_op(op, payload)),
             "ok": ok,
             "error": error,
             "duration_ms": duration_ms,

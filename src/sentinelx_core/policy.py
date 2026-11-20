@@ -400,6 +400,10 @@ class Policy:
     # supported way to say no. Now there is.
     disabled_ops: frozenset[str] = field(default_factory=frozenset)
 
+    # Explicit, opt-in operation for the independent root-owned broker.
+    # This never changes script_run or generic exec privileges.
+    privileged_broker_enabled: bool = False
+
     # Command prefixes the agent will execute via the `exec` op.
     # An exec request matches if cmd.startswith(allowed) for some entry.
     allowed_commands: tuple[str, ...] = field(default_factory=tuple)
@@ -616,6 +620,9 @@ class Policy:
         exec_block = data.get("exec", {}) or {}
         security_block = data.get("security", {}) or {}
         file_ops_block = data.get("file_ops", {}) or {}
+        broker_enabled = security_block.get("privileged_broker_enabled", False)
+        if type(broker_enabled) is not bool:
+            raise ValueError("security.privileged_broker_enabled must be a boolean")
 
         services: dict[str, ServiceSpec] = {}
         for name, meta in (data.get("services") or {}).items():
@@ -899,6 +906,7 @@ class Policy:
             disabled_ops=frozenset(
                 str(o).strip() for o in (data.get("disabled_ops") or []) if str(o).strip()
             ),
+            privileged_broker_enabled=broker_enabled,
             services=services,
             local_apis=local_apis,
             locations=locations,
