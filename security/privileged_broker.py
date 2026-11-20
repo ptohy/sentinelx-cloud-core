@@ -135,6 +135,14 @@ class TicketStore:
             "boot_id TEXT NOT NULL, issued_ns INTEGER NOT NULL, expires_ns INTEGER NOT NULL,"
             "consumed_ns INTEGER)"
         )
+        # Root-initiated operations have NO remote bearer token. Status reports
+        # are safe to query over local_api with an empty JSON-RPC params object.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS host_operations("
+            "request_id TEXT PRIMARY KEY, operation TEXT NOT NULL,"
+            "boot_id TEXT NOT NULL, started_ns INTEGER NOT NULL,"
+            "finished_ns INTEGER, outcome TEXT NOT NULL)"
+        )
 
     def issue(
         self, operation: str, uid: int, gid: int, ttl_seconds: int,
@@ -189,6 +197,86 @@ class TicketStore:
             reject("ticket store unavailable")
 
 
+    def run_host_operation(self, request_id: str, operation: str) -> dict[str, Any]:
+        """A trusted root actor directly schedules a fixed effect, never the Hub.
+
+        Insert/commit precedes the effect, so a crash cannot reissue the same
+        request id. A crash between commit and effect leaves started_unknown,
+        *not* a false success and not an invitation to retry automatically.
+        """
+        if operation not in OPERATIONS:
+            reject("operation not allowlisted")
+        if not isinstance(request_id, str) or not re.fullmatch(r"[0-9a-f]{32}", request_id):
+            reject("root request identity invalid")
+        now_ns = time.time_ns()
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            self.db.execute(
+                "INSERT INTO host_operations "
+                "(request_id, operation, boot_id, started_ns, finished_ns, outcome) "
+                "VALUES (?, ?, ?, ?, NULL, 'started_unknown')",
+                (request_id, operation, self.boot_id, now_ns),
+            )
+            self.db.execute("COMMIT")
+        except sqlite3.IntegrityError:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            reject("root request already submitted")
+        except sqlite3.Error:
+            if self.db.in_transaction:
+                self.db.execute("ROLLBACK")
+            reject("host operation store unavailable")
+
+        outcome = "failed"
+        try:
+            _fixed_operation(operation)
+            outcome = "completed"
+        except Rejected:
+            # A previously committed root intent must remain consumed.
+            pass
+        except Exception:
+            # Keep the error generic; never expose subprocess output or secrets.
+            pass
+        try:
+            self.db.execute(
+                "UPDATE host_operations SET outcome=?, finished_ns=? "
+                "WHERE request_id=? AND outcome='started_unknown'",
+                (outcome, time.time_ns(), request_id),
+            )
+        except sqlite3.Error:
+            reject("host operation outcome unconfirmed")
+        if outcome != "completed":
+            reject("fixed root operation failed")
+        return {"ok": True, "operation": operation, "completed": True, "request_id": request_id}
+
+    def recent_host_operations(self) -> dict[str, Any]:
+        """Only bounded non-sensitive receipts; no command args, env or tokens."""
+        try:
+            rows = self.db.execute(
+                "SELECT request_id, operation, boot_id, started_ns, finished_ns, outcome "
+                "FROM host_operations ORDER BY started_ns DESC, request_id DESC LIMIT 10"
+            ).fetchall()
+        except sqlite3.Error:
+            reject("host operation status unavailable")
+        return {
+            "ok": True,
+            "read_only": True,
+            "entries": [
+                {
+                    "request_id": request_id,
+                    "operation": operation,
+                    # Previous-boot starts are never reported as running.
+                    "status": "unconfirmed_after_restart"
+                    if boot_id != self.boot_id and outcome == "started_unknown"
+                    else outcome,
+                    "started_at_ns": started_ns,
+                    "finished_at_ns": finished_ns,
+                }
+                for request_id, operation, boot_id, started_ns, finished_ns, outcome in rows
+            ],
+        }
+
+
 def _peercred(connection: socket.socket) -> tuple[int, int, int]:
     if not sys.platform.startswith("linux") or not hasattr(socket, "SO_PEERCRED"):
         reject("peer credentials unavailable")
@@ -225,10 +313,10 @@ def _read_request(connection: socket.socket) -> dict[str, Any]:
 
 
 def _jsonrpc_to_native(obj: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    """Allow only the fixed execution action through local_api JSON-RPC.
+    """Only allow read-only status over remote JSON-RPC; never any effect.
 
-    Issuing a ticket via JSON-RPC is intentionally impossible. Root issuance
-    is available only through the separate, root-authenticated native route.
+    Neither ticket issuance/consumption nor root command execution is
+    available over local_api. The Hub only sees bounded, secretless receipts.
     """
     if set(obj) != {"jsonrpc", "id", "method", "params"}:
         reject("JSON-RPC request fields invalid")
@@ -237,26 +325,11 @@ def _jsonrpc_to_native(obj: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         obj["jsonrpc"] != "2.0"
         or not isinstance(request_id, str)
         or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", request_id)
-        or obj["method"] not in ("tohy.audit.check", "tohy.audit.record")
+        or obj["method"] != "tohy.audit.status"
+        or obj["params"] != {}
     ):
-        reject("JSON-RPC request not allowlisted")
-    params = obj["params"]
-    if not isinstance(params, dict) or set(params) != {"ticket"}:
-        reject("JSON-RPC parameters invalid")
-    # The operation is derived solely from the fixed RPC method. No caller-
-    # provided params field can turn a configured read into a write.
-    operation = {
-        "tohy.audit.check": "audit-check",
-        "tohy.audit.record": "audit-record",
-    }[obj["method"]]
-    ticket = params["ticket"]
-    if not isinstance(ticket, str) or not re.fullmatch(r"[0-9a-f]{64}", ticket):
-        reject("JSON-RPC ticket format invalid")
-    return request_id, {
-        "version": VERSION, "action": "execute",
-        "operation": operation, "ticket": ticket,
-    }
-
+        reject("JSON-RPC method or parameters not allowlisted")
+    return request_id, {"version": VERSION, "action": "status"}
 
 def _fixed_operation(operation: str) -> dict[str, Any]:
     """Only immutable argv; never a shell, dynamic path, user-provided env or cwd."""
@@ -293,6 +366,18 @@ class Broker:
         self.store = TicketStore(database_dir / "tickets.sqlite3")
 
     def handle(self, obj: dict[str, Any], uid: int, gid: int) -> dict[str, Any]:
+        if obj.get("action") == "status":
+            if set(obj) != {"version", "action"}:
+                reject("status request fields invalid")
+            if uid != 0 and (uid, gid) != (AGENT_UID, AGENT_GID):
+                reject("authorized status reader identity required")
+            return self.store.recent_host_operations()
+        if obj.get("action") == "run":
+            if set(obj) != {"version", "action", "operation", "request_id"}:
+                reject("root operation request fields invalid")
+            if uid != 0:
+                reject("root identity required for privileged operation")
+            return self.store.run_host_operation(obj["request_id"], obj["operation"])
         if obj.get("action") == "issue":
             if set(obj) != {"version", "action", "operation", "target_uid", "target_gid", "ttl_seconds"}:
                 reject("issue request fields invalid")
